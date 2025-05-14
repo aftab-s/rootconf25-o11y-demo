@@ -1,0 +1,46 @@
+
+
+livedebugging {
+  enabled = true
+}
+
+loki.source.api "loki_push_api" {
+    http {
+        listen_address = "0.0.0.0"
+        listen_port = 9999
+    }
+    forward_to = [
+        loki.process.labels.receiver,
+    ]
+}
+
+loki.process "labels" {
+    stage.json {
+      expressions = { "extracted_service" = "service_name", 
+                      "extracted_code_line" = "code_line", 
+                      "extracted_server" = "server_id", 
+                    }
+    }
+
+  stage.labels {
+    values = {
+      "service_name" = "extracted_service",
+    }
+  }
+
+  stage.structured_metadata {
+    values = {
+      "code_line" = "extracted_code_line",
+      "server" = "extracted_server",
+    }
+}
+
+forward_to = [loki.write.local.receiver]
+
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

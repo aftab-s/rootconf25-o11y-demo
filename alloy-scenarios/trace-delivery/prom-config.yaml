@@ -1,0 +1,15 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+otlp:
+  # Recommended attributes to be promoted to labels.
+  promote_resource_attributes:
+    - service.name
+    - service.namespace
+    - service.version
+    - deployment.environment
+
+storage:
+  tsdb:
+    out_of_order_time_window: 30m 

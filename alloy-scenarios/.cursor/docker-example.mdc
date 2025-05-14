@@ -1,0 +1,494 @@
+---
+description: creating a new alloy docker example
+globs: 
+alwaysApply: false
+---
+# Grafana Alloy Docker Example Template
+
+This template provides a comprehensive structure for creating a new Grafana Alloy example using Docker Compose. It includes all the necessary components to monitor your application or system with the LGMT stack (Loki, Grafana, Metrics/Prometheus, Tempo).
+
+## Directory Structure
+
+```
+your-example-name/
+├── config.alloy            # Alloy configuration file
+├── docker-compose.yml      # Docker Compose configuration
+├── loki-config.yaml        # Loki configuration
+├── prom-config.yaml        # Prometheus configuration
+├── tempo-config.yaml       # Tempo configuration (optional)
+├── README.md               # Documentation for your example
+└── [additional files...]   # Any additional files needed for your example
+```
+
+## Docker Compose Template
+
+Below is a template for your `docker-compose.yml` file that includes all components of the LGMT stack. You can customize it based on your specific needs.
+
+```yaml
+version: '3.8'
+
+services:
+  # Loki for log aggregation
+  loki:
+    image: grafana/loki:${GRAFANA_LOKI_VERSION:-3.5.0}
+    ports:
+      - 3100:3100/tcp
+    volumes:
+      - ./loki-config.yaml:/etc/loki/local-config.yaml
+    command: -config.file=/etc/loki/local-config.yaml
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:${PROMETHEUS_VERSION:-v3.3.0}
+    command:
+      - --web.enable-remote-write-receiver
+      - --web.enable-otlp-receiver
+      - --enable-feature=native-histograms
+      - --enable-feature=exemplar-storage
+      - --config.file=/etc/prometheus/prometheus.yml
+    ports:
+      - 9090:9090/tcp
+    volumes:
+      - ./prom-config.yaml:/etc/prometheus/prometheus.yml
+
+  # Memcached for Tempo
+  memcached:
+    image: memcached:1.6.29
+    container_name: memcached
+    ports:
+      - "11211:11211"
+    environment:
+      - MEMCACHED_MAX_MEMORY=64m  # Set the maximum memory usage
+      - MEMCACHED_THREADS=4       # Number of threads to use
+
+  # Tempo initialization (required for file permissions)
+  tempo-init:
+    image: &tempoImage grafana/tempo:${GRAFANA_TEMPO_VERSION:-2.7.2}
+    user: root
+    entrypoint:
+      - "chown"
+      - "10001:10001"
+      - "/var/tempo"
+    volumes:
+      - ./tempo-data:/var/tempo
+
+  # Tempo for tracing
+  tempo:
+    image: *tempoImage
+    command: ["-config.file=/etc/tempo.yaml"]
+    ports:
+      - 3200:3200/tcp    # tempo
+      - 4317:4317/tcp    # otlp grpc
+      - 4318:4318/tcp    # otlp http
+      - 14268:14268/tcp  # jaeger thrift http
+      - 14250:14250/tcp  # jaeger grpc
+      - 6831:6831/udp    # jaeger thrift compact
+      - 6832:6832/udp    # jaeger thrift binary
+      - 9411:9411/tcp    # zipkin
+    volumes:
+      - ./tempo-config.yaml:/etc/tempo.yaml
+      - ./tempo-data:/var/tempo
+    depends_on:
+      - tempo-init
+      - memcached
+      - prometheus
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:${GRAFANA_VERSION:-11.6.1}
+    environment:
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_BASIC_ENABLED=false
+      - GF_INSTALL_PLUGINS=https://storage.googleapis.com/integration-artifacts/grafana-exploretraces-app/grafana-exploretraces-app-latest.zip;grafana-traces-app
+    ports:
+      - 3000:3000/tcp
+    entrypoint:
+      - sh
+      - -euc
+      - |
+        mkdir -p /etc/grafana/provisioning/datasources
+        cat <<EOF > /etc/grafana/provisioning/datasources/ds.yaml
+        apiVersion: 1
+        datasources:
+        - name: Loki
+          type: loki
+          access: proxy
+          orgId: 1
+          url: http://loki:3100
+          basicAuth: false
+          isDefault: false
+          version: 1
+          editable: false
+        - name: Prometheus
+          type: prometheus
+          orgId: 1
+          url: http://prometheus:9090
+          basicAuth: false
+          isDefault: true
+          version: 1
+          editable: false
+        - name: Tempo
+          type: tempo
+          access: proxy
+          orgId: 1
+          url: http://tempo:3200
+          basicAuth: false
+          isDefault: false
+          version: 1
+          editable: false
+          jsonData:
+            serviceMap:
+              datasourceUid: 'Prometheus'
+            nodeGraph:
+              enabled: true
+        EOF
+        /run.sh
+    depends_on:
+      - prometheus
+      - tempo
+
+  # Alloy for telemetry pipeline
+  alloy:
+    image: grafana/alloy:${GRAFANA_ALLOY_VERSION:-v1.8.2}
+    ports:
+      - 12345:12345      # Alloy HTTP server
+    volumes:
+      - ./config.alloy:/etc/alloy/config.alloy
+      - /var/run/docker.sock:/var/run/docker.sock  # For Docker monitoring (optional)
+    command: run --server.http.listen-addr=0.0.0.0:12345 --storage.path=/var/lib/alloy/data /etc/alloy/config.alloy
+```
+
+## Configuration Files
+
+### Loki Configuration (loki-config.yaml)
+
+```yaml
+auth_enabled: false
+
+limits_config:
+  allow_structured_metadata: true
+  volume_enabled: true
+
+server:
+  http_listen_port: 3100
+
+common:
+  ring:
+    instance_addr: 0.0.0.0
+    kvstore:
+      store: inmemory
+  replication_factor: 1
+  path_prefix: /tmp/loki
+
+schema_config:
+  configs:
+  - from: 2020-05-15
+    store: tsdb
+    object_store: filesystem
+    schema: v13
+    index:
+      prefix: index_
+      period: 24h
+
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /tmp/loki/index
+    cache_location: /tmp/loki/index_cache
+  filesystem:
+    directory: /tmp/loki/chunks
+
+pattern_ingester:
+  enabled: true
+
+ingester:
+  max_chunk_age: 2h
+```
+
+### Prometheus Configuration (prom-config.yaml)
+
+```yaml
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'alloy'
+    static_configs:
+      - targets: ['alloy:12345']
+
+otlp:
+  # Recommended attributes to be promoted to labels.
+  promote_resource_attributes:
+    - service.instance.id
+    - service.name
+    - service.namespace
+    - service.version
+    - cloud.availability_zone
+    - cloud.region
+    - container.name
+    - deployment.environment
+    - deployment.environment.name
+    - k8s.cluster.name
+    - k8s.container.name
+    - k8s.namespace.name
+    - k8s.pod.name
+
+storage:
+  tsdb:
+    out_of_order_time_window: 30m
+```
+
+### Tempo Configuration (tempo-config.yaml)
+
+```yaml
+server:
+  http_listen_port: 3200
+  log_level: info
+
+cache:
+  background:
+    writeback_goroutines: 5
+  caches:
+  - roles:
+    - frontend-search  
+    memcached: 
+      addresses: dns+memcached:11211
+
+query_frontend:
+  search:
+    duration_slo: 5s
+    throughput_bytes_slo: 1.073741824e+09
+    metadata_slo:
+        duration_slo: 5s
+        throughput_bytes_slo: 1.073741824e+09
+  trace_by_id:
+    duration_slo: 100ms
+  metrics:
+    max_duration: 200h                # maximum duration of a metrics query, increase for local setups
+    query_backend_after: 5m
+    duration_slo: 5s
+    throughput_bytes_slo: 1.073741824e+09
+
+distributor:
+  receivers:                           
+    jaeger:                            
+      protocols:                       
+        thrift_http:                   
+          endpoint: "tempo:14268"      
+        grpc:
+          endpoint: "tempo:14250"
+        thrift_binary:
+          endpoint: "tempo:6832"
+        thrift_compact:
+          endpoint: "tempo:6831"
+    zipkin:
+      endpoint: "tempo:9411"
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "tempo:4317"
+        http:
+          endpoint: "tempo:4318"
+    opencensus:
+      endpoint: "tempo:55678"
+
+ingester:
+  max_block_duration: 5m               
+
+compactor:
+  compaction:
+    block_retention: 720h              
+
+# Note: The metrics_generator section below can be enabled for built-in service graphs.
+# Alternatively, use Alloy's servicegraph connector as shown in alloy-service-graphs example.
+# metrics_generator:
+#   registry:
+#     external_labels:
+#       source: tempo
+#       cluster: docker-compose
+#   storage:
+#     path: /var/tempo/generator/wal
+#     remote_write:
+#       - url: http://prometheus:9090/api/v1/write
+#         send_exemplars: true
+#   traces_storage:
+#     path: /var/tempo/generator/traces
+#   processor:
+#     local_blocks:
+#       filter_server_spans: false
+#       flush_to_storage: true
+
+storage:
+  trace:
+    backend: local                     
+    wal:
+      path: /var/tempo/wal             
+    local:
+      path: /var/tempo/blocks
+
+# Note: Service graph generation is commented out to allow using Alloy for this purpose.
+# overrides:
+#   defaults:
+#     metrics_generator:
+#       processors: [service-graphs, span-metrics, local-blocks]
+#       generate_native_histograms: both
+```
+
+### Alloy Configuration with Service Graph Generation (config.alloy)
+
+```river
+/*
+ * Alloy Configuration for OpenTelemetry Trace Collection with Service Graph Generation
+ */
+
+// Receive OpenTelemetry traces
+otelcol.receiver.otlp "default" {
+  http {}
+  grpc {}
+
+  output {
+    traces = [otelcol.processor.batch.default.input]
+  }
+}
+
+// Batch processor to improve performance
+otelcol.processor.batch "default" {
+  output {
+    traces = [
+      otelcol.connector.servicegraph.default.input,
+      otelcol.exporter.otlp.tempo.input,
+    ]
+  }
+}
+
+// Service Graph Generator 
+otelcol.connector.servicegraph "default" {
+  metrics_flush_interval = "10s"
+  dimensions = ["http.method"]
+  
+  output {
+    metrics = [otelcol.exporter.otlphttp.prometheus.input]
+  }
+}
+
+// Send service graph metrics to Prometheus via OTLP
+otelcol.exporter.otlphttp "prometheus" {
+  client {
+    endpoint = "http://prometheus:9090/api/v1/otlp"
+    tls {
+      insecure = true
+    }
+  }
+}
+
+// Send traces to Tempo for storage and visualization
+otelcol.exporter.otlp "tempo" {
+  client {
+    endpoint = "tempo:4317"
+    tls {
+      insecure = true
+    }
+  }
+}
+```
+
+## README Template
+
+The README.md file for your example should include:
+
+1. A brief description of what the example demonstrates
+2. Instructions for running the example
+3. What to expect after running the example
+4. Any additional steps or configuration needed
+
+Example:
+
+```markdown
+# Your Example Name
+
+Brief description of what this example demonstrates and its purpose.
+
+## Overview
+
+The example includes:
+- Component 1 (brief description)
+- Component 2 (brief description)
+- ...
+
+## Running the Demo
+
+1. Clone the repository:
+   ```
+   git clone https://github.com/grafana/alloy-scenarios.git
+   cd alloy-scenarios
+   ```
+
+2. Navigate to this example directory:
+   ```
+   cd your-example-name
+   ```
+
+3. Run using Docker Compose:
+   ```
+   docker compose up -d
+   ```
+   
+   Or use the centralized image management:
+   ```
+   cd ..
+   ./run-example.sh your-example-name
+   ```
+
+4. Access Grafana at http://localhost:3000
+
+## What to Expect
+
+Describe what the user should see after running the example, including:
+- What metrics/logs are being collected
+- Any dashboards that are automatically set up
+- How to interact with the example
+
+## Service Graphs (if applicable)
+
+If your example includes service graph visualization capabilities:
+
+1. Open Grafana (http://localhost:3000)
+2. Navigate to Explore
+3. Select the Tempo data source
+4. Click on the "Service Graph" tab
+5. You should see a visual representation of the relationships between services
+
+## Architecture
+
+```
+┌────────────┐     ┌──────────┐      ┌───────┐      ┌─────────┐
+│ Component1 │────▶│ Component2│─────▶│Component3│──▶│ Grafana │
+└────────────┘     └──────────┘      └───┬───┘      └─────────┘
+                                         │                ▲
+                                         ▼                │
+                                    ┌─────────┐           │
+                                    │Component4│───────────┘
+                                    └─────────┘
+```
+
+Brief explanation of the architecture and data flow.
+
+## Additional Configuration
+
+Any additional steps or configuration that might be needed.
+```
+
+## Customizing Your Example
+
+To create your own example:
+
+1. Create a new directory with your example name at the root of the repository
+2. Copy the template files from this template
+3. Customize the files for your specific use case
+4. Update the README.md with specific instructions for your example
+5. Add your example to the main README.md table with a link and description

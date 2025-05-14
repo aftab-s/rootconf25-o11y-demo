@@ -1,0 +1,27 @@
+/*
+ * Alloy Configuration for OpenTelemetry Trace Collection
+ */
+
+otelcol.receiver.otlp "default" {
+  http {}
+  grpc {}
+
+  output {
+    traces = [otelcol.processor.batch.default.input]
+  }
+}
+
+otelcol.processor.batch "default" {
+  output {
+    traces = [otelcol.exporter.otlp.tempo.input]
+  }
+}
+
+otelcol.exporter.otlp "tempo" {
+  client {
+    endpoint = "tempo:4317"
+    tls {
+			insecure = true
+		}
+  }
+} 

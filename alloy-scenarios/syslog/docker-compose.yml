@@ -1,0 +1,80 @@
+version: '3.8'
+
+services:
+  # Rsyslog service
+  rsyslog:
+    image: rsyslog/syslog_appliance_alpine:latest
+    container_name: rsyslog
+    ports:
+      - "514:514/udp"     # Standard syslog UDP port
+      - "514:514/tcp"     # Standard syslog TCP port (if needed)
+    volumes:
+      - ./rsyslog.conf:/etc/rsyslog.conf    # Custom rsyslog configuration
+    depends_on:
+      - alloy
+
+  # Syslog simulator using a Python script
+  syslog-simulator:
+    image: python:${PYTHON_VERSION:-3.11-slim}
+    container_name: syslog-simulator
+    volumes:
+      - ./syslog_simulator.py:/syslog_simulator.py  # Syslog simulator script
+    environment:
+      - SYSLOG_HOST=rsyslog
+      - SYSLOG_PORT=514
+    depends_on:
+      - rsyslog
+    command: ["python3", "/syslog_simulator.py"]
+  
+
+  alloy:
+    image: grafana/alloy:${GRAFANA_ALLOY_VERSION:-v1.8.2}
+    ports:
+      - 12345:12345
+      - 51893:51893
+      - 51898:51898
+    volumes:
+      - ./config.alloy:/etc/alloy/config.alloy
+      - ./logs:/tmp/app-logs/
+    command: run --server.http.listen-addr=0.0.0.0:12345 --stability.level=experimental  --storage.path=/var/lib/alloy/data /etc/alloy/config.alloy
+    depends_on:
+      - loki
+
+  loki:
+    image: grafana/loki:${GRAFANA_LOKI_VERSION:-3.5.0}
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki-config.yaml:/etc/loki/local-config.yaml
+    command: -config.file=/etc/loki/local-config.yaml
+
+  grafana:
+    image: grafana/grafana:${GRAFANA_VERSION:-11.6.1}
+    environment:
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_BASIC_ENABLED=false
+    ports:
+      - 3000:3000/tcp
+    entrypoint:
+       - sh
+       - -euc
+       - |
+         mkdir -p /etc/grafana/provisioning/datasources
+         cat <<EOF > /etc/grafana/provisioning/datasources/ds.yaml
+         apiVersion: 1
+         datasources:
+         - name: Loki
+           type: loki
+           access: proxy
+           orgId: 1
+           url: http://loki:3100
+           basicAuth: false
+           isDefault: false
+           version: 1
+           editable: false
+         EOF
+         /run.sh
+
+volumes:
+  rsyslog_data:

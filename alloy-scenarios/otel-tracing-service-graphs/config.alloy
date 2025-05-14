@@ -1,0 +1,63 @@
+/*
+ * Alloy Configuration for OpenTelemetry Trace Collection with Service Graph Generation
+ */
+
+// Receive OpenTelemetry traces
+otelcol.receiver.otlp "default" {
+  http {}
+  grpc {}
+
+  output {
+    traces = [otelcol.processor.batch.default.input]
+  }
+}
+
+// Batch processor to improve performance
+otelcol.processor.batch "default" {
+  output {
+    traces = [
+      otelcol.connector.servicegraph.default.input,
+      otelcol.exporter.otlp.tempo.input,
+    ]
+  }
+}
+
+// Service Graph Generator 
+otelcol.connector.servicegraph "default" {
+  metrics_flush_interval = "10s"
+  dimensions = ["service.name", "http.method"]
+  
+  // Configure the span store for better pairing
+  store {
+    max_items = 5000
+    ttl = "30s"
+  }
+  
+  output {
+    metrics = [otelcol.exporter.otlphttp.prometheus.input]
+  }
+}
+
+// Send service graph metrics to Prometheus via OTLP
+otelcol.exporter.otlphttp "prometheus" {
+  client {
+    endpoint = "http://prometheus:9090/api/v1/otlp"
+    tls {
+      insecure = true
+    }
+  }
+}
+
+// Send traces to Tempo for storage and visualization
+otelcol.exporter.otlp "tempo" {
+  client {
+    endpoint = "tempo:4317"
+    tls {
+      insecure = true
+    }
+  }
+} 
+
+livedebugging {
+  enabled = true
+}

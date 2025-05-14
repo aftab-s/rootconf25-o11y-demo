@@ -1,0 +1,115 @@
+/*
+ * Alloy Configuration for OpenTelemetry Trace Collection with Tail Sampling
+ */
+
+// Receive OpenTelemetry traces
+otelcol.receiver.otlp "default" {
+  http {}
+  grpc {}
+
+  output {
+    traces = [otelcol.processor.tail_sampling.default.input]
+  }
+}
+
+// Tail Sampling processor
+otelcol.processor.tail_sampling "default" {
+  // Wait time to make a sampling decision
+  decision_wait = "10s"
+  
+  // Number of traces kept in memory
+  num_traces = 100
+  
+  // Expected new traces per second
+  expected_new_traces_per_sec = 10
+  
+  // Policy 1: Always sample traces with a specific attribute value
+  policy {
+    name = "test-attribute-policy"
+    type = "string_attribute"
+    
+    string_attribute {
+      key    = "test_attr_key_1"
+      values = ["test_attr_val_1"]
+    }
+  }
+  
+  // Policy 2: Sample error traces
+  policy {
+    name = "error-policy"
+    type = "status_code"
+    
+    status_code {
+      status_codes = ["ERROR"]
+    }
+  }
+  
+  // Policy 3: Sample high latency traces
+  policy {
+    name = "latency-policy"
+    type = "latency"
+    
+    latency {
+      threshold_ms = 5000  // 5 seconds
+    }
+  }
+  
+  // Policy 4: Sample traces matching a numeric attribute range
+  policy {
+    name = "numeric-policy"
+    type = "numeric_attribute"
+    
+    numeric_attribute {
+      key       = "key1"
+      min_value = 70
+      max_value = 100
+    }
+  }
+  
+  // Policy 5: URL-based policy to filter out health checks
+  policy {
+    name = "url-filter-policy"
+    type = "string_attribute"
+    
+    string_attribute {
+      key             = "http.url"
+      values          = ["/health", "/metrics"]
+      invert_match    = true  // Sample everything EXCEPT these URLs
+    }
+  }
+  
+  // Policy 6: Probabilistic sampling as a fallback (sample 10% of remaining traces)
+  policy {
+    name = "probabilistic-policy"
+    type = "probabilistic"
+    
+    probabilistic {
+      sampling_percentage = 10
+    }
+  }
+  
+  output {
+    traces = [otelcol.processor.batch.default.input]
+  }
+}
+
+// Batch processor to improve performance
+otelcol.processor.batch "default" {
+  output {
+    traces = [otelcol.exporter.otlp.tempo.input]
+  }
+}
+
+// Send sampled traces to Tempo
+otelcol.exporter.otlp "tempo" {
+  client {
+    endpoint = "tempo:4317"
+    tls {
+      insecure = true
+    }
+  }
+} 
+
+livedebugging {
+  enabled = true
+}

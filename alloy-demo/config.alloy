@@ -1,0 +1,39 @@
+prometheus.scrape "default" {
+  targets = [
+    {"__address__" = "54.159.159.211:9100"},
+  ]
+
+  scrape_interval = "3s"
+  scrape_timeout  = "1s"
+
+  forward_to = [prometheus.relabel.default.receiver]
+}
+
+prometheus.relabel "default" { 
+  rule {
+    action = "drop"
+    regex = "node_cpu_seconds_total"
+    source_labels = ["__name__"]
+  }
+  rule {
+    action = "replace"
+    regex = "54.159.159.211:9100"
+    source_labels = ["instance"]
+    replacement = "Linux Instance"
+    target_label = "instance"
+  }
+  forward_to = [prometheus.remote_write.local.receiver]
+}
+
+// Define where to send the metrics for storage
+prometheus.remote_write "local" {
+  endpoint {
+    // Send metrics to a locally running Prometheus instance
+    url = "http://prometheus:9090/api/v1/write"
+  }
+}
+
+// Enable live debugging features (empty config means use defaults)
+livedebugging{
+  enabled = true
+}

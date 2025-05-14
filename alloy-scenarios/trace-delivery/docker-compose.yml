@@ -1,0 +1,194 @@
+version: '3.8'
+
+services:
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:${PROMETHEUS_VERSION:-v3.3.0}
+    command:
+      - --web.enable-remote-write-receiver
+      - --web.enable-otlp-receiver
+      - --enable-feature=native-histograms
+      - --enable-feature=exemplar-storage
+      - --config.file=/etc/prometheus/prometheus.yml
+    ports:
+      - 9090:9090/tcp
+    volumes:
+      - ./prom-config.yaml:/etc/prometheus/prometheus.yml
+
+  memcached:
+    image: memcached:1.6.29
+    container_name: memcached
+    ports:
+      - "11211:11211"
+    environment:
+      - MEMCACHED_MAX_MEMORY=64m  # Set the maximum memory usage
+      - MEMCACHED_THREADS=4       # Number of threads to use
+
+  # Tempo for tracing
+  tempo:
+    image: grafana/tempo:${GRAFANA_TEMPO_VERSION:-2.7.2}
+    command: ["-config.file=/etc/tempo.yaml"]
+    ports:
+      - 3200:3200/tcp    # tempo
+    volumes:
+      - ./tempo-config.yaml:/etc/tempo.yaml
+    depends_on:
+      - prometheus
+      - memcached
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:${GRAFANA_VERSION:-11.6.1}
+    environment:
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_BASIC_ENABLED=false
+      - GF_INSTALL_PLUGINS=https://storage.googleapis.com/integration-artifacts/grafana-exploretraces-app/grafana-exploretraces-app-latest.zip;grafana-traces-app
+    ports:
+      - 3000:3000/tcp
+    entrypoint:
+      - sh
+      - -euc
+      - |
+        mkdir -p /etc/grafana/provisioning/datasources
+        cat <<EOF > /etc/grafana/provisioning/datasources/ds.yaml
+        apiVersion: 1
+        datasources:
+        - name: Prometheus
+          type: prometheus
+          orgId: 1
+          url: http://prometheus:9090
+          basicAuth: false
+          isDefault: false
+          version: 1
+          editable: false
+        - name: Tempo
+          type: tempo
+          access: proxy
+          orgId: 1
+          url: http://tempo:3200
+          basicAuth: false
+          isDefault: true
+          version: 1
+          editable: false
+          jsonData:
+            serviceMap:
+              datasourceUid: 'Prometheus'
+            nodeGraph:
+              enabled: true
+        EOF
+        /run.sh
+    depends_on:
+      - prometheus
+      - tempo
+
+  # Alloy for telemetry pipeline
+  alloy:
+    image: grafana/alloy:${GRAFANA_ALLOY_VERSION:-v1.8.2}
+    ports:
+      - 12345:12345      # Alloy HTTP server
+      - 4317:4317/tcp    # OTLP gRPC (used by our services)
+      - 4318:4318/tcp    # OTLP HTTP (used by our services)
+    volumes:
+      - ./config.alloy:/etc/alloy/config.alloy
+    command: run --server.http.listen-addr=0.0.0.0:12345 --storage.path=/var/lib/alloy/data /etc/alloy/config.alloy
+    depends_on:
+      - tempo
+      - prometheus
+
+  # Sofa Shop Service
+  sofa-shop:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+      args:
+        - PYTHON_VERSION=${PYTHON_VERSION:-3.11-slim}
+    ports:
+      - 8080:8080
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy:4317
+      - OTEL_SERVICE_NAME=sofa-shop
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=sofa-shop,service.version=1.0.0,deployment.environment=delivery-demo
+      - SERVICE_FACTORY_URL=http://sofa-factory:8081
+    depends_on:
+      - alloy
+      - sofa-factory
+    restart: on-failure
+
+  # Sofa Factory Service
+  sofa-factory:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+      args:
+        - PYTHON_VERSION=${PYTHON_VERSION:-3.11-slim}
+    ports:
+      - 8081:8081
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy:4317
+      - OTEL_SERVICE_NAME=sofa-factory
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=sofa-factory,service.version=1.0.0,deployment.environment=delivery-demo
+      - SERVICE_PORT=8081
+      - SERVICE_DISTRIBUTION_URL=http://global-distribution:8082
+    depends_on:
+      - alloy
+      - global-distribution
+    restart: on-failure
+
+  # Global Distribution Service
+  global-distribution:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+      args:
+        - PYTHON_VERSION=${PYTHON_VERSION:-3.11-slim}
+    ports:
+      - 8082:8082
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy:4317
+      - OTEL_SERVICE_NAME=global-distribution
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=global-distribution,service.version=1.0.0,deployment.environment=delivery-demo
+      - SERVICE_PORT=8082
+      - SERVICE_LOCAL_URL=http://local-distribution:8083
+    depends_on:
+      - alloy
+      - local-distribution
+    restart: on-failure
+
+  # Local Distribution Service
+  local-distribution:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+      args:
+        - PYTHON_VERSION=${PYTHON_VERSION:-3.11-slim}
+    ports:
+      - 8083:8083
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy:4317
+      - OTEL_SERVICE_NAME=local-distribution
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=local-distribution,service.version=1.0.0,deployment.environment=delivery-demo
+      - SERVICE_PORT=8083
+      - SERVICE_CUSTOMER_URL=http://customer-house:8084
+    depends_on:
+      - alloy
+      - customer-house
+    restart: on-failure
+
+  # Customer House Service
+  customer-house:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+      args:
+        - PYTHON_VERSION=${PYTHON_VERSION:-3.11-slim}
+    ports:
+      - 8084:8084
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy:4317
+      - OTEL_SERVICE_NAME=customer-house
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=customer-house,service.version=1.0.0,deployment.environment=delivery-demo
+      - SERVICE_PORT=8084
+    depends_on:
+      - alloy
+    restart: on-failure 

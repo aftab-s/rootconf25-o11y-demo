@@ -2,10 +2,8 @@ prometheus.scrape "default" {
   targets = [
     {"__address__" = "54.159.159.211:9100"},
   ]
-
   scrape_interval = "3s"
   scrape_timeout  = "1s"
-
   forward_to = [prometheus.relabel.default.receiver]
 }
 
